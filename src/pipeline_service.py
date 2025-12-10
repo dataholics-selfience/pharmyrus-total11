@@ -1,546 +1,424 @@
 """
 Pipeline Service v3.1 HOTFIX - Complete Patent Intelligence Pipeline
-CORREÇÕES:
-- WO discovery corrigido com múltiplas fontes
-- Integração com WIPO crawler local (não mais chamada externa)
-- Debug detalhado em camadas
-- Extração completa de worldwide applications
+CRITICAL FIXES:
+- WO discovery with 20+ parallel queries
+- Local WIPO crawler integration (no external API)
+- Layered debug system
+- Complete worldwide applications processing
 """
 import asyncio
 import aiohttp
+import logging
 import time
 import re
-from typing import Dict, List, Any, Optional
+from typing import Dict, Any, List, Optional
 from datetime import datetime
+
 from .wipo_crawler import WIPOCrawler
-import logging
 
 logger = logging.getLogger(__name__)
 
 class PipelineService:
-    """Orchestrates complete patent search pipeline"""
+    """
+    Complete patent intelligence pipeline
+    
+    LAYERS:
+    1. PubChem - Molecular data (CAS, dev codes, synonyms)
+    2. WO Discovery - Find WO patents (20+ parallel queries)
+    3. WIPO Details - Extract complete patent data
+    4. INPI Brasil - Direct BR patent search
+    5. FDA - Approval status
+    6. ClinicalTrials - Trial data
+    """
     
     def __init__(self):
-        self.serp_api_key = "3f22448f4d43ce8259fa2f7f6385222323a67c4ce4e72fcc774b43d23812889d"
+        self.pubchem_base = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
+        self.serpapi_key = "3f22448f4d43ce8259fa2f7f6385222323a67c4ce4e72fcc774b43d23812889d"
         self.inpi_api = "https://crawler3-production.up.railway.app/api/data/inpi/patents"
-        self.fda_api = "https://api.fda.gov/drug"
-        self.clinical_trials_api = "https://clinicaltrials.gov/api/v2/studies"
-        self.pubchem_api = "https://pubchem.ncbi.nlm.nih.gov/rest/pug"
-        
+    
     async def execute_full_pipeline(
         self,
         molecule: str,
         country_filter: Optional[str] = None,
         limit: int = 20
     ) -> Dict[str, Any]:
-        """Execute complete 6-layer pipeline with parallel processing"""
-        
+        """
+        Execute complete pipeline with all layers
+        """
         start_time = time.time()
-        debug_layers = []
-        
-        # Layer 1: PubChem
-        layer1_start = time.time()
-        pubchem_data = await self._layer1_pubchem(molecule)
-        layer1_duration = time.time() - layer1_start
-        debug_layers.append({
-            "layer": "Layer 1: PubChem",
-            "status": "success" if pubchem_data.get("cid") else "partial",
-            "duration_seconds": round(layer1_duration, 2),
-            "data_points": len(pubchem_data.get("synonyms", [])),
-            "details": f"Found {len(pubchem_data.get('dev_codes', []))} dev codes, {len(pubchem_data.get('synonyms', []))} synonyms"
-        })
-        
-        # Layer 2: WO Discovery (CORRIGIDO!)
-        layer2_start = time.time()
-        wo_numbers = await self._layer2_discover_wos(molecule, pubchem_data)
-        layer2_duration = time.time() - layer2_start
-        debug_layers.append({
-            "layer": "Layer 2: WO Discovery",
-            "status": "success" if wo_numbers else "no_results",
-            "duration_seconds": round(layer2_duration, 2),
-            "data_points": len(wo_numbers),
-            "details": f"Found {len(wo_numbers)} WO patents from parallel queries"
-        })
-        
-        wo_numbers_limited = wo_numbers[:limit]
-        
-        # Layers 3-6: Parallel execution
-        layer3_start = time.time()
-        
-        results = await asyncio.gather(
-            self._layer3_patent_details(wo_numbers_limited, country_filter),
-            self._layer4_inpi_brasil(molecule, pubchem_data),
-            self._layer5_fda_data(molecule),
-            self._layer6_clinical_trials(molecule),
-            return_exceptions=True
-        )
-        
-        patent_details, inpi_patents, fda_data, clinical_data = results
-        layer3_duration = time.time() - layer3_start
-        
-        # Debug layers 3-6
-        if isinstance(patent_details, Exception):
-            patent_details = {"patents": [], "errors": [str(patent_details)]}
-        debug_layers.append({
-            "layer": "Layer 3: Patent Details",
-            "status": "success" if patent_details.get("patents") else "no_results",
-            "duration_seconds": round(layer3_duration, 2),
-            "data_points": len(patent_details.get("patents", [])),
-            "details": f"Processed {len(wo_numbers_limited)} WO patents with worldwide data"
-        })
-        
-        if isinstance(inpi_patents, Exception):
-            inpi_patents = {"br_patents": [], "errors": [str(inpi_patents)]}
-        debug_layers.append({
-            "layer": "Layer 4: INPI Brasil",
-            "status": "success" if inpi_patents.get("br_patents") else "no_results",
-            "duration_seconds": round(layer3_duration, 2),
-            "data_points": len(inpi_patents.get("br_patents", [])),
-            "details": f"Found {len(inpi_patents.get('br_patents', []))} BR patents"
-        })
-        
-        if isinstance(fda_data, Exception):
-            fda_data = {"approval_status": "Error", "errors": [str(fda_data)]}
-        debug_layers.append({
-            "layer": "Layer 5: FDA",
-            "status": "success" if fda_data.get("approval_status") != "Error" else "error",
-            "duration_seconds": round(layer3_duration, 2),
-            "data_points": len(fda_data.get("applications", [])),
-            "details": f"FDA Status: {fda_data.get('approval_status', 'Unknown')}"
-        })
-        
-        if isinstance(clinical_data, Exception):
-            clinical_data = {"total_trials": 0, "errors": [str(clinical_data)]}
-        debug_layers.append({
-            "layer": "Layer 6: Clinical Trials",
-            "status": "success" if clinical_data.get("total_trials", 0) > 0 else "no_results",
-            "duration_seconds": round(layer3_duration, 2),
-            "data_points": clinical_data.get("total_trials", 0),
-            "details": f"Found {clinical_data.get('total_trials', 0)} clinical trials"
-        })
-        
-        all_patents = self._aggregate_patents(patent_details, inpi_patents)
-        
-        total_duration = time.time() - start_time
-        executive_summary = self._build_executive_summary(
-            molecule,
-            pubchem_data,
-            all_patents,
-            fda_data,
-            clinical_data
-        )
-        
-        response = {
-            "executive_summary": executive_summary,
-            "pubchem_data": pubchem_data,
-            "search_strategy": {
-                "pipeline_version": "3.1-HOTFIX",
-                "execution_mode": "parallel_batch",
-                "layers_executed": ["PubChem", "Google Patents", "WIPO", "INPI", "FDA", "ClinicalTrials"],
-                "total_wo_patents": len(wo_numbers),
-                "wo_patents_processed": len(wo_numbers_limited),
-                "country_filter": country_filter or "ALL",
-                "parallel_processing": True,
-                "sources": {
-                    "pubchem": "NIH PubChem API",
-                    "google_patents": "SerpAPI Google Patents",
-                    "wipo": "WIPO Patentscope Crawler (local)",
-                    "inpi": "INPI Brasil API",
-                    "fda": "FDA API",
-                    "clinical_trials": "ClinicalTrials.gov API v2"
-                }
-            },
-            "wo_patents": patent_details.get("patents", []),
-            "br_patents_inpi": inpi_patents.get("br_patents", []),
-            "all_patents": all_patents,
-            "fda_data": fda_data,
-            "clinical_trials_data": clinical_data,
-            "debug_info": {
-                "total_duration_seconds": round(total_duration, 2),
-                "layers": debug_layers,
-                "timings": {
-                    "pubchem": round(layer1_duration, 2),
-                    "wo_discovery": round(layer2_duration, 2),
-                    "parallel_batch": round(layer3_duration, 2),
-                    "total": round(total_duration, 2)
-                },
-                "errors_count": sum(1 for layer in debug_layers if layer["status"] == "error"),
-                "warnings_count": sum(1 for layer in debug_layers if layer["status"] in ["partial", "no_results"]),
-                "errors": [],
-                "warnings": []
-            },
-            "generated_at": datetime.utcnow().isoformat()
+        debug_info = {
+            'layers': [],
+            'timings': {},
+            'errors_count': 0,
+            'warnings_count': 0
         }
         
-        return response
+        logger.info(f"🚀 Pipeline START: {molecule}")
+        
+        # LAYER 1: PubChem
+        layer1_start = time.time()
+        pubchem_data = await self._layer1_pubchem(molecule)
+        debug_info['timings']['pubchem'] = round(time.time() - layer1_start, 2)
+        debug_info['layers'].append({
+            'layer': 'Layer 1: PubChem',
+            'status': 'success' if pubchem_data else 'failed',
+            'duration_seconds': debug_info['timings']['pubchem'],
+            'data_points': len(pubchem_data.get('dev_codes', [])) if pubchem_data else 0
+        })
+        
+        # LAYER 2: WO Discovery (FIXED!)
+        layer2_start = time.time()
+        wo_numbers = await self._layer2_discover_wos(molecule, pubchem_data)
+        debug_info['timings']['wo_discovery'] = round(time.time() - layer2_start, 2)
+        debug_info['layers'].append({
+            'layer': 'Layer 2: WO Discovery',
+            'status': 'success',
+            'duration_seconds': debug_info['timings']['wo_discovery'],
+            'data_points': len(wo_numbers),
+            'details': f"Found {len(wo_numbers)} WO patents from parallel queries"
+        })
+        
+        # Apply limit
+        wo_numbers = wo_numbers[:limit]
+        
+        # LAYER 3: WIPO Patent Details (FIXED!)
+        layer3_start = time.time()
+        wo_patents = await self._layer3_patent_details(wo_numbers, country_filter)
+        debug_info['timings']['parallel_batch'] = round(time.time() - layer3_start, 2)
+        debug_info['layers'].append({
+            'layer': 'Layer 3: WIPO Details',
+            'status': 'success',
+            'duration_seconds': debug_info['timings']['parallel_batch'],
+            'data_points': len(wo_patents),
+            'details': f"Processed {len(wo_numbers)} WO patents with complete data"
+        })
+        
+        # LAYER 4: INPI Brasil
+        layer4_start = time.time()
+        br_patents_inpi = await self._layer4_inpi_brasil(molecule, pubchem_data)
+        debug_info['timings']['inpi'] = round(time.time() - layer4_start, 2)
+        debug_info['layers'].append({
+            'layer': 'Layer 4: INPI Brasil',
+            'status': 'success',
+            'duration_seconds': debug_info['timings']['inpi'],
+            'data_points': len(br_patents_inpi)
+        })
+        
+        # LAYER 5: FDA (optional)
+        fda_status = await self._layer5_fda(molecule)
+        
+        # LAYER 6: ClinicalTrials (optional)
+        clinical_trials = await self._layer6_clinical_trials(molecule)
+        
+        # Build final result
+        total_duration = time.time() - start_time
+        debug_info['timings']['total'] = round(total_duration, 2)
+        
+        all_patents = wo_patents + br_patents_inpi
+        
+        # Count by jurisdiction
+        jurisdictions = {}
+        for p in all_patents:
+            pub_num = p.get('publication_number', '')
+            if 'BR' in pub_num:
+                jurisdictions['brazil'] = jurisdictions.get('brazil', 0) + 1
+            elif 'US' in pub_num:
+                jurisdictions['usa'] = jurisdictions.get('usa', 0) + 1
+            elif 'EP' in pub_num:
+                jurisdictions['europe'] = jurisdictions.get('europe', 0) + 1
+            elif 'WO' in pub_num:
+                jurisdictions['wipo'] = jurisdictions.get('wipo', 0) + 1
+        
+        result = {
+            'executive_summary': {
+                'molecule_name': molecule,
+                'total_patents': len(all_patents),
+                'wo_patents_found': len(wo_patents),
+                'br_patents_inpi': len(br_patents_inpi),
+                'jurisdictions': jurisdictions,
+                'fda_status': fda_status.get('status') if fda_status else 'unknown',
+                'clinical_trials_count': clinical_trials.get('total', 0) if clinical_trials else 0,
+                'pubchem_data': pubchem_data,
+                'country_filter_applied': country_filter
+            },
+            'wo_patents': wo_patents,
+            'br_patents_inpi': br_patents_inpi,
+            'all_patents': all_patents,
+            'fda_data': fda_status,
+            'clinical_trials': clinical_trials,
+            'debug_info': debug_info,
+            'timestamp': datetime.utcnow().isoformat()
+        }
+        
+        logger.info(f"✅ Pipeline COMPLETE: {len(all_patents)} patents in {total_duration:.1f}s")
+        return result
     
-    async def _layer1_pubchem(self, molecule: str) -> Dict[str, Any]:
-        """Layer 1: Fetch PubChem data"""
+    async def _layer1_pubchem(self, molecule: str) -> Optional[Dict[str, Any]]:
+        """Layer 1: PubChem molecular data"""
         try:
+            url = f"{self.pubchem_base}/compound/name/{molecule}/synonyms/JSON"
+            
             async with aiohttp.ClientSession() as session:
-                url = f"{self.pubchem_api}/compound/name/{molecule}/synonyms/JSON"
-                async with session.get(url, timeout=30) as resp:
+                async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                     if resp.status != 200:
-                        return {"error": "PubChem not found"}
+                        return None
                     
                     data = await resp.json()
-                    synonyms = data.get("InformationList", {}).get("Information", [{}])[0].get("Synonym", [])
+                    syns = data.get('InformationList', {}).get('Information', [{}])[0].get('Synonym', [])
                     
                     dev_codes = []
-                    cas_number = None
+                    cas = None
                     
-                    dev_pattern = re.compile(r'^[A-Z]{2,5}-?\d{3,7}[A-Z]?$', re.I)
-                    cas_pattern = re.compile(r'^\d{2,7}-\d{2}-\d$')
+                    for s in syns:
+                        # Dev codes pattern: XX-12345
+                        if re.match(r'^[A-Z]{2,5}[-\s]?\d{3,7}[A-Z]?$', s, re.IGNORECASE):
+                            if len(dev_codes) < 10:
+                                dev_codes.append(s)
+                        
+                        # CAS number pattern: 12345-67-8
+                        if re.match(r'^\d{2,7}-\d{2}-\d$', s) and not cas:
+                            cas = s
                     
-                    for syn in synonyms[:100]:
-                        if dev_pattern.match(syn) and len(dev_codes) < 20:
-                            dev_codes.append(syn)
-                        if cas_pattern.match(syn) and not cas_number:
-                            cas_number = syn
-                    
-                    cid_url = f"{self.pubchem_api}/compound/name/{molecule}/property/MolecularFormula,MolecularWeight,IUPACName,CanonicalSMILES,InChI,InChIKey/JSON"
-                    properties = {}
-                    try:
-                        async with session.get(cid_url, timeout=30) as prop_resp:
-                            if prop_resp.status == 200:
-                                prop_data = await prop_resp.json()
-                                props = prop_data.get("PropertyTable", {}).get("Properties", [{}])[0]
-                                properties = {
-                                    "cid": props.get("CID"),
-                                    "molecular_formula": props.get("MolecularFormula"),
-                                    "molecular_weight": props.get("MolecularWeight"),
-                                    "iupac_name": props.get("IUPACName"),
-                                    "canonical_smiles": props.get("CanonicalSMILES"),
-                                    "inchi": props.get("InChI"),
-                                    "inchi_key": props.get("InChIKey")
-                                }
-                    except:
-                        pass
+                    logger.info(f"  📦 PubChem: {len(dev_codes)} dev codes, CAS={cas}")
                     
                     return {
-                        "cid": properties.get("cid"),
-                        "synonyms": synonyms[:50],
-                        "dev_codes": dev_codes,
-                        "cas_number": cas_number,
-                        **properties
+                        'dev_codes': dev_codes,
+                        'cas': cas,
+                        'synonyms': syns[:50]  # First 50 synonyms
                     }
-        except Exception as e:
-            return {"error": str(e), "synonyms": [], "dev_codes": []}
-    
-    async def _layer2_discover_wos(self, molecule: str, pubchem_data: Dict) -> List[str]:
-        """
-        Layer 2: Discover WO patent numbers (CORRIGIDO!)
-        Usa múltiplas fontes paralelas
-        """
         
+        except Exception as e:
+            logger.error(f"  ❌ PubChem error: {e}")
+            return None
+    
+    async def _layer2_discover_wos(
+        self,
+        molecule: str,
+        pubchem_data: Optional[Dict] = None
+    ) -> List[str]:
+        """
+        Layer 2: WO Discovery with multiple parallel queries
+        
+        CRITICAL FIX v3.1: Now executes 20+ queries in parallel
+        """
+        dev_codes = pubchem_data.get('dev_codes', []) if pubchem_data else []
+        
+        # Build search queries
         queries = []
         
-        # Queries por ano (2011-2024)
+        # Year-based queries (2011-2024)
         for year in range(2011, 2025):
             queries.append(f"{molecule} patent WO{year}")
         
-        # Dev code queries
-        for dev_code in pubchem_data.get("dev_codes", [])[:5]:
-            queries.append(f"{dev_code} patent WO")
-            queries.append(f'"{dev_code}" WO patent')
+        # Dev code queries (top 5)
+        for dev in dev_codes[:5]:
+            queries.append(f"{dev} patent WO")
         
-        # Company queries
-        queries.extend([
-            f"{molecule} Orion Corporation patent",
-            f"{molecule} Bayer patent",
-            f'"{molecule}" pharmaceutical patent WO',
-            f'"{molecule}" compound patent WO'
-        ])
+        # Company-specific queries
+        queries.append(f"{molecule} Orion Corporation patent")
+        queries.append(f"{molecule} Bayer patent")
         
-        # Execute parallel searches
-        logger.info(f"🔎 Executando {len(queries)} queries paralelas para WO discovery...")
+        # Quoted variations
+        queries.append(f'"{molecule}" patent WO')
         
-        async with aiohttp.ClientSession() as session:
-            tasks = []
-            for query in queries[:20]:  # Limit to 20
-                url = f"https://serpapi.com/search.json"
-                params = {
-                    "engine": "google",
-                    "q": query,
-                    "api_key": self.serp_api_key,
-                    "num": 10
-                }
-                tasks.append(self._fetch_search(session, url, params))
-            
-            results = await asyncio.gather(*tasks, return_exceptions=True)
+        logger.info(f"  🔍 WO Discovery: {len(queries)} parallel queries")
         
-        # Extract WO numbers with better regex
-        wo_pattern = re.compile(r'WO[\s-]?(\d{4})[\s/]?(\d{6})', re.I)
+        # Execute all queries in parallel
+        tasks = [self._google_search_wo(q) for q in queries]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Extract WO numbers from all results
         wo_numbers = set()
+        wo_pattern = re.compile(r'WO[\s-]?(\d{4})[\s/]?(\d{6})', re.IGNORECASE)
         
         for result in results:
-            if isinstance(result, dict):
-                for item in result.get("organic_results", []):
-                    text = f"{item.get('title', '')} {item.get('snippet', '')} {item.get('link', '')}"
-                    matches = wo_pattern.findall(text)
-                    for year, num in matches:
-                        wo_numbers.add(f"WO{year}{num}")
+            if isinstance(result, Exception):
+                continue
+            
+            for item in result.get('organic_results', []):
+                text = f"{item.get('title', '')} {item.get('snippet', '')} {item.get('link', '')}"
+                
+                for match in wo_pattern.finditer(text):
+                    wo = f"WO{match.group(1)}{match.group(2)}"
+                    wo_numbers.add(wo)
         
         wo_list = sorted(list(wo_numbers))
-        logger.info(f"✅ Descobriu {len(wo_list)} WO numbers únicos")
+        logger.info(f"  ✅ WO Discovery: {len(wo_list)} unique WO patents found")
         
         return wo_list
     
-    async def _fetch_search(self, session: aiohttp.ClientSession, url: str, params: Dict) -> Dict:
-        """Helper to fetch search results"""
+    async def _google_search_wo(self, query: str) -> Dict:
+        """Execute single Google search via SerpAPI"""
         try:
-            async with session.get(url, params=params, timeout=30) as resp:
-                if resp.status == 200:
-                    return await resp.json()
-                return {}
-        except:
+            url = "https://serpapi.com/search.json"
+            params = {
+                'engine': 'google',
+                'q': query,
+                'api_key': self.serpapi_key,
+                'num': 10
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        return await resp.json()
+                    return {}
+        
+        except Exception as e:
+            logger.warning(f"  ⚠️ Search failed for: {query}")
             return {}
     
-    async def _layer3_patent_details(self, wo_numbers: List[str], country_filter: Optional[str]) -> Dict:
+    async def _layer3_patent_details(
+        self,
+        wo_numbers: List[str],
+        country_filter: Optional[str] = None
+    ) -> List[Dict[str, Any]]:
         """
-        Layer 3: Fetch detailed patent information (CORRIGIDO!)
-        Usa WIPO crawler LOCAL em vez de chamada externa
-        """
+        Layer 3: WIPO Patent Details with LOCAL crawler
         
+        CRITICAL FIX v3.1: Uses local WIPOCrawler instead of external API
+        """
         if not wo_numbers:
-            return {"patents": [], "errors": []}
+            return []
         
-        logger.info(f"📄 Buscando detalhes de {len(wo_numbers)} patentes WO...")
+        logger.info(f"  🔄 Processing {len(wo_numbers)} WO patents...")
         
         patents = []
-        errors = []
+        errors = 0
         
-        # Usa WIPO crawler local
+        # Use local crawler with context manager
         async with WIPOCrawler(max_retries=3, timeout=60000, headless=True) as crawler:
-            for wo in wo_numbers:
+            for i, wo in enumerate(wo_numbers):
                 try:
-                    logger.info(f"🔍 Processando {wo}...")
-                    patent_data = await crawler.fetch_patent(wo)
+                    logger.info(f"  [{i+1}/{len(wo_numbers)}] Processing {wo}")
                     
-                    if patent_data.get('erro'):
-                        errors.append(f"{wo}: {patent_data.get('erro')}")
-                    else:
-                        # Filtra por país se solicitado
-                        if country_filter:
-                            if country_filter in patent_data.get('paises_familia', []):
-                                patents.append(patent_data)
-                            else:
-                                logger.info(f"⏭️  {wo} não tem aplicações em {country_filter}")
-                        else:
-                            patents.append(patent_data)
-                        
-                        logger.info(f"✅ {wo}: {len(patent_data.get('worldwide_applications', {}))} aplicações worldwide")
+                    data = await crawler.fetch_patent(wo)
                     
+                    if data.get('erro'):
+                        errors += 1
+                        continue
+                    
+                    # Filter by country if requested
+                    if country_filter:
+                        worldwide = data.get('worldwide_applications', {})
+                        filtered_apps = {}
+                        
+                        for year, apps in worldwide.items():
+                            filtered = [app for app in apps if app.get('country_code') == country_filter]
+                            if filtered:
+                                filtered_apps[year] = filtered
+                        
+                        data['worldwide_applications'] = filtered_apps
+                    
+                    # Count total applications
+                    total_apps = sum(
+                        len(apps)
+                        for apps in data.get('worldwide_applications', {}).values()
+                    )
+                    
+                    logger.info(f"  ✅ {wo}: {total_apps} aplicações worldwide")
+                    
+                    patents.append({
+                        'publication_number': wo,
+                        'title': data.get('titulo'),
+                        'abstract': data.get('resumo'),
+                        'applicant': data.get('titular'),
+                        'filing_date': data.get('datas', {}).get('deposito'),
+                        'publication_date': data.get('datas', {}).get('publicacao'),
+                        'inventors': data.get('inventores'),
+                        'ipc_cpc': data.get('cpc_ipc'),
+                        'pdf_link': data.get('pdf_link'),
+                        'worldwide_applications': data.get('worldwide_applications'),
+                        'countries': data.get('paises_familia'),
+                        'debug': data.get('debug'),
+                        'source': 'WIPO'
+                    })
+                
                 except Exception as e:
-                    logger.error(f"❌ Erro em {wo}: {e}")
-                    errors.append(f"{wo}: {str(e)}")
+                    logger.error(f"  ❌ Error processing {wo}: {e}")
+                    errors += 1
         
-        return {
-            "patents": patents,
-            "errors": errors
-        }
+        logger.info(f"  ✅ Layer 3 complete: {len(patents)} patents, {errors} errors")
+        return patents
     
-    async def _layer4_inpi_brasil(self, molecule: str, pubchem_data: Dict) -> Dict:
-        """Layer 4: Search INPI Brasil"""
-        
-        br_patents = []
-        errors = []
-        
-        queries = [molecule]
-        queries.extend(pubchem_data.get("dev_codes", [])[:5])
-        
-        async with aiohttp.ClientSession() as session:
-            for query in queries:
-                try:
-                    url = f"{self.inpi_api}?medicine={query}"
-                    async with session.get(url, timeout=60) as resp:
-                        if resp.status == 200:
-                            data = await resp.json()
-                            patents = data.get("data", [])
-                            for p in patents:
-                                if p.get("title", "").startswith("BR"):
-                                    br_patents.append({
-                                        "number": p.get("title", "").replace(" ", "-"),
-                                        "title": p.get("applicant", ""),
-                                        "filing_date": p.get("depositDate", ""),
-                                        "source": "inpi_direct",
-                                        "link": f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={p.get('title', '')}"
-                                    })
-                except Exception as e:
-                    errors.append(f"INPI {query}: {str(e)}")
-        
-        return {
-            "br_patents": br_patents,
-            "errors": errors
-        }
-    
-    async def _layer5_fda_data(self, molecule: str) -> Dict:
-        """Layer 5: Fetch FDA data"""
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.fda_api}/ndc.json?search=generic_name:\"{molecule}\""
-                async with session.get(url, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        results = data.get("results", [])
-                        
-                        applications = []
-                        for r in results[:10]:
-                            applications.append({
-                                "product_ndc": r.get("product_ndc"),
-                                "brand_name": r.get("brand_name"),
-                                "generic_name": r.get("generic_name"),
-                                "labeler_name": r.get("labeler_name"),
-                                "dosage_form": r.get("dosage_form"),
-                                "route": r.get("route", []),
-                                "marketing_category": r.get("marketing_category"),
-                                "application_number": r.get("application_number")
-                            })
-                        
-                        return {
-                            "approval_status": "Approved" if applications else "Not Found",
-                            "applications": applications,
-                            "total_products": len(results)
-                        }
-            
-            return {"approval_status": "Not Found", "applications": [], "total_products": 0}
-            
-        except Exception as e:
-            return {"approval_status": "Error", "error": str(e), "applications": []}
-    
-    async def _layer6_clinical_trials(self, molecule: str) -> Dict:
-        """Layer 6: Fetch Clinical Trials data"""
-        
-        try:
-            async with aiohttp.ClientSession() as session:
-                url = f"{self.clinical_trials_api}?query.term={molecule}&pageSize=100"
-                async with session.get(url, timeout=30) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        studies = data.get("studies", [])
-                        
-                        by_phase = {}
-                        by_status = {}
-                        sponsors = set()
-                        countries = set()
-                        
-                        trial_details = []
-                        
-                        for study in studies[:20]:
-                            proto = study.get("protocolSection", {})
-                            ident = proto.get("identificationModule", {})
-                            status_mod = proto.get("statusModule", {})
-                            design = proto.get("designModule", {})
-                            sponsor = proto.get("sponsorCollaboratorsModule", {})
-                            location = proto.get("contactsLocationsModule", {})
-                            
-                            phase = design.get("phases", ["Unknown"])[0] if design.get("phases") else "Unknown"
-                            status = status_mod.get("overallStatus", "Unknown")
-                            
-                            by_phase[phase] = by_phase.get(phase, 0) + 1
-                            by_status[status] = by_status.get(status, 0) + 1
-                            
-                            lead_sponsor = sponsor.get("leadSponsor", {}).get("name")
-                            if lead_sponsor:
-                                sponsors.add(lead_sponsor)
-                            
-                            for loc in location.get("locations", []):
-                                country = loc.get("country")
-                                if country:
-                                    countries.add(country)
-                            
-                            trial_details.append({
-                                "nct_id": ident.get("nctId"),
-                                "title": ident.get("briefTitle"),
-                                "phase": phase,
-                                "status": status,
-                                "enrollment": status_mod.get("enrollmentInfo", {}).get("count"),
-                                "start_date": status_mod.get("startDateStruct", {}).get("date"),
-                                "primary_sponsor": lead_sponsor
-                            })
-                        
-                        return {
-                            "total_trials": len(studies),
-                            "by_phase": by_phase,
-                            "by_status": by_status,
-                            "sponsors": sorted(list(sponsors)),
-                            "countries": sorted(list(countries)),
-                            "trial_details": trial_details
-                        }
-            
-            return {"total_trials": 0}
-            
-        except Exception as e:
-            return {"total_trials": 0, "error": str(e)}
-    
-    def _aggregate_patents(self, patent_details: Dict, inpi_patents: Dict) -> List[Dict]:
-        """Aggregate all patents from different sources"""
-        
-        all_patents = []
-        seen = set()
-        
-        # From WO patents (worldwide applications)
-        for patent in patent_details.get("patents", []):
-            wo_num = patent.get("publicacao")
-            if wo_num and wo_num not in seen:
-                seen.add(wo_num)
-                all_patents.append({
-                    "number": wo_num,
-                    "type": "WO",
-                    "title": patent.get("titulo"),
-                    "applicant": patent.get("titular"),
-                    "filing_date": patent.get("datas", {}).get("deposito"),
-                    "source": "wipo",
-                    "worldwide_apps": len(patent.get("worldwide_applications", {})),
-                    "countries": patent.get("paises_familia", [])
-                })
-        
-        # From INPI direct
-        for patent in inpi_patents.get("br_patents", []):
-            num = patent.get("number")
-            if num and num not in seen:
-                seen.add(num)
-                all_patents.append({
-                    "number": num,
-                    "type": "BR",
-                    "title": patent.get("title"),
-                    "filing_date": patent.get("filing_date"),
-                    "source": "inpi",
-                    "link": patent.get("link")
-                })
-        
-        return all_patents
-    
-    def _build_executive_summary(
+    async def _layer4_inpi_brasil(
         self,
         molecule: str,
-        pubchem_data: Dict,
-        all_patents: List[Dict],
-        fda_data: Dict,
-        clinical_data: Dict
-    ) -> Dict:
-        """Build executive summary"""
+        pubchem_data: Optional[Dict] = None
+    ) -> List[Dict[str, Any]]:
+        """Layer 4: INPI Brasil direct search"""
+        try:
+            params = {'medicine': molecule}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(self.inpi_api, params=params, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+                    if resp.status != 200:
+                        return []
+                    
+                    data = await resp.json()
+                    patents_data = data.get('data', [])
+                    
+                    patents = []
+                    for p in patents_data:
+                        if p.get('title', '').startswith('BR'):
+                            patents.append({
+                                'publication_number': p.get('title', '').replace(' ', '-'),
+                                'title': p.get('applicant', ''),
+                                'abstract': p.get('fullText', '')[:300],
+                                'filing_date': p.get('depositDate', ''),
+                                'link': f"https://busca.inpi.gov.br/pePI/servlet/PatenteServletController?Action=detail&CodPedido={p.get('title', '')}",
+                                'source': 'INPI'
+                            })
+                    
+                    logger.info(f"  📄 INPI Brasil: {len(patents)} patents")
+                    return patents
         
-        jurisdictions = {
-            "brazil": sum(1 for p in all_patents if p.get("type") == "BR" or "BR" in p.get("countries", [])),
-            "usa": sum(1 for p in all_patents if "US" in p.get("countries", [])),
-            "europe": sum(1 for p in all_patents if "EP" in p.get("countries", [])),
-            "japan": sum(1 for p in all_patents if "JP" in p.get("countries", [])),
-            "china": sum(1 for p in all_patents if "CN" in p.get("countries", [])),
-            "wipo": sum(1 for p in all_patents if p.get("type") == "WO")
-        }
+        except Exception as e:
+            logger.error(f"  ❌ INPI error: {e}")
+            return []
+    
+    async def _layer5_fda(self, molecule: str) -> Optional[Dict[str, Any]]:
+        """Layer 5: FDA approval status"""
+        try:
+            url = f"https://api.fda.gov/drug/ndc.json"
+            params = {'search': f'generic_name:{molecule}', 'limit': 1}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        results = data.get('results', [])
+                        
+                        if results:
+                            return {
+                                'status': 'Approved',
+                                'labeler': results[0].get('labeler_name'),
+                                'product_ndc': results[0].get('product_ndc')
+                            }
         
-        return {
-            "molecule_name": molecule,
-            "generic_name": pubchem_data.get("iupac_name", "")[:100],
-            "commercial_name": molecule.title(),
-            "cas_number": pubchem_data.get("cas_number"),
-            "dev_codes": pubchem_data.get("dev_codes", []),
-            "total_patents": len(all_patents),
-            "total_families": len(set(p.get("number") for p in all_patents if p.get("number"))),
-            "jurisdictions": jurisdictions,
-            "fda_status": fda_data.get("approval_status", "Unknown"),
-            "clinical_trials_count": clinical_data.get("total_trials", 0),
-            "consistency_score": 1 if all_patents else 0
-        }
+        except:
+            pass
+        
+        return {'status': 'Not Found'}
+    
+    async def _layer6_clinical_trials(self, molecule: str) -> Optional[Dict[str, Any]]:
+        """Layer 6: ClinicalTrials.gov data"""
+        try:
+            url = f"https://clinicaltrials.gov/api/v2/studies"
+            params = {'query.term': molecule, 'pageSize': 10}
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        total = data.get('totalCount', 0)
+                        
+                        return {
+                            'total': total,
+                            'status': 'Active' if total > 0 else 'None Found'
+                        }
+        
+        except:
+            pass
+        
+        return {'total': 0, 'status': 'Unknown'}
