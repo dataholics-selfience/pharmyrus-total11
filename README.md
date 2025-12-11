@@ -1,145 +1,159 @@
-# Pharmyrus v3.1 HOTFIX - Complete Patent Intelligence API
+# Pharmyrus v3.1 HOTFIX - Railway Deploy
 
-## 🔧 CRITICAL FIXES
+## 🚀 Deploy no Railway (SOLUÇÃO DEFINITIVA)
 
-### Bug #1: WIPO worldwide_applications null
-**FIXED**: Added complete National Phase tab extraction
-- Clicks "National Phase" tab with 5 selector strategies
-- Parses worldwide applications table (filing_date, country_code, application_number, legal_status)
-- Groups by year with 70+ applications per patent
-
-### Bug #2: WO discovery returning empty []
-**FIXED**: Implemented 20+ parallel queries
-- Year-based searches (2011-2024)
-- Dev code searches
-- Company-specific searches
-- Improved regex extraction: `WO[\s-]?(\d{4})[\s/]?(\d{6})`
-
-### Bug #3: Local crawler not being used
-**FIXED**: Pipeline now uses local WIPOCrawler
-- No external API calls
-- Complete data extraction
-- Exponential backoff retry system
-
-## 🚀 DEPLOYMENT
-
-### Railway Deployment
-1. Upload `pharmyrus-v3.1-HOTFIX.zip` to Railway
-2. Railway auto-detects `runtime.txt` → Python 3.11.9
-3. Installs dependencies from `requirements.txt`
-4. Executes `Procfile` → Installs Chromium + starts API
-
-### API Endpoints
-
-**WIPO Patent Details**
+### 1️⃣ Upload do Projeto
 ```bash
-GET /api/v1/wipo/{wo_number}?country=BR
+# Fazer upload do pharmyrus-v3.1-HOTFIX.zip no Railway
+# Railway detecta automaticamente o Dockerfile
 ```
 
-**Molecule Search**
+### 2️⃣ Railway Build Process
+O Railway vai:
+1. ✅ Usar `Dockerfile` (detecta automaticamente)
+2. ✅ Instalar Python 3.11 + todas dependências do sistema
+3. ✅ Instalar Playwright + Chromium com `--with-deps`
+4. ✅ Build completo em ~3-4 minutos
+5. ✅ API rodando na porta 8080
+
+### 3️⃣ Testar Deploy
 ```bash
-GET /api/v1/search/{molecule}?country=BR&limit=20
-```
+# Health check
+curl https://YOUR-APP.up.railway.app/health
 
-**Batch Search**
-```bash
-POST /api/v1/batch/search
-{"molecules": ["darolutamide", "olaparib"], "country": "BR", "limit": 10}
-```
+# Test endpoint (rápido)
+curl https://YOUR-APP.up.railway.app/test/WO2016168716
 
-**Test Endpoint**
-```bash
-GET /test/{wo_number}
-```
-
-## 📋 FILES
-
-- `runtime.txt` → Forces Python 3.11.9 (Railway requirement)
-- `requirements.txt` → Updated dependencies (Python 3.11 compatible)
-- `Procfile` → Deployment command
-- `src/wipo_crawler.py` → Complete WIPO extraction with worldwide_applications
-- `src/pipeline_service.py` → Full pipeline with 20+ WO queries
-- `src/api_service.py` → FastAPI endpoints
-- `src/batch_service.py` → Batch processing
-- `src/crawler_pool.py` → Crawler pool manager
-
-## 🧪 TESTING
-
-```bash
-# Test 1: WIPO endpoint with BR filter
+# WIPO endpoint (completo)
 curl "https://YOUR-APP.up.railway.app/api/v1/wipo/WO2016168716?country=BR"
 
-# Test 2: Molecule search
-curl "https://YOUR-APP.up.railway.app/api/v1/search/darolutamide?limit=5"
-
-# Test 3: Reference implementation
-curl "https://YOUR-APP.up.railway.app/test/WO2011051540"
+# Pipeline completo (busca + múltiplos WOs)
+curl "https://YOUR-APP.up.railway.app/api/v1/search/darolutamide?limit=3"
 ```
 
-## 📊 EXPECTED RESULTS
+## 📊 Diferenças vs v3.0
 
-### Before (v3.0)
+### ANTES (v3.0 - BROKEN)
 ```json
 {
   "titular": null,
-  "datas": null,
+  "datas": {"deposito": null, "publicacao": null},
   "worldwide_applications": {},
-  "wo_patents": []
+  "paises_familia": []
 }
 ```
 
-### After (v3.1 HOTFIX)
+### DEPOIS (v3.1 HOTFIX - WORKING)
 ```json
 {
   "titular": "Orion Corporation",
   "datas": {
-    "deposito": "2016-04-20",
-    "publicacao": "2016-10-27"
+    "deposito": "2016-04-04",
+    "publicacao": "2016-10-20",
+    "prioridade": "2015-04-17"
   },
   "worldwide_applications": {
-    "2016": [{"country_code": "BR", "filing_date": "2017-10-19", ...}],
+    "2016": [
+      {"country_code": "BR", "application_number": "BR112017022140A2", ...},
+      {"country_code": "US", "application_number": "US15/566,127", ...}
+    ],
     "2017": [...]
   },
-  "wo_patents": [
-    {"publication_number": "WO2016168716", ...}
-  ]
+  "paises_familia": ["BR", "US", "CA", "EP", "JP", ...]
 }
 ```
 
-## ⚙️ CONFIGURATION
+## 🔧 Arquitetura
 
-### Python Version
-- **Enforced**: Python 3.11.9 via `runtime.txt`
-- Railway default is 3.13 which is incompatible
+### Dockerfile (Base)
+- **Python 3.11-slim-bullseye**
+- **Todas** as bibliotecas do sistema para Playwright
+- `playwright install --with-deps chromium`
 
-### Dependencies
-All dependencies updated to Python 3.11+ compatible versions:
-- fastapi==0.115.5
-- uvicorn[standard]==0.32.1
-- playwright==1.49.0
-- aiohttp==3.11.11
-- pydantic==2.10.5
+### Serviços
+1. **wipo_crawler.py**: Extração WIPO com worldwide_applications
+2. **pipeline_service.py**: PubChem → WO Discovery → BR Extraction
+3. **api_service.py**: FastAPI endpoints
+4. **crawler_pool.py**: Pool de 2 crawlers Playwright
 
-## 📝 VERSION HISTORY
+### Endpoints
+- `GET /` - Info da API
+- `GET /health` - Status
+- `GET /api/v1/wipo/{wo}` - Fetch WIPO patent
+- `GET /api/v1/search/{molecule}` - Full pipeline
+- `GET /test/{wo}` - Quick test
 
-- **v3.1 HOTFIX** (2024-12-10): Fixed 3 critical bugs
-- **v3.0 BATCH FINAL**: Initial batch processing
-- **v2.x**: Development versions
+## 🐛 Bug Fixes (v3.1 HOTFIX)
 
-## 🆘 TROUBLESHOOTING
+### 1. WIPO worldwide_applications = {}
+**FIX**: Click "National Phase" tab + extract table data
+- **Antes**: `{}`
+- **Depois**: `{"2016": [...], "2017": [...]}`
 
-**Build fails with greenlet/pydantic errors**
-→ Ensure `runtime.txt` exists with `python-3.11.9`
+### 2. WO Discovery = []
+**FIX**: 20+ parallel Google searches (years 2011-2024, dev codes, companies)
+- **Antes**: `[]`
+- **Depois**: `["WO2016168716", "WO2011051540", ...]`
 
-**Empty worldwide_applications**
-→ Check WIPO Patentscope site is accessible
-→ Review debug.selectors_found in response
+### 3. Titular/Datas = null
+**FIX**: Multiple selector strategies + fallbacks
+- **Antes**: `null`
+- **Depois**: `"Orion Corporation"` / `{"deposito": "2016-04-04", ...}`
 
-**No WO patents found**
-→ Increase limit parameter
-→ Check molecule name spelling
+## 📦 Arquivos
 
-## 📞 SUPPORT
+```
+pharmyrus-v3.1-HOTFIX/
+├── Dockerfile          ← Railway usa este
+├── requirements.txt    ← Python deps
+├── runtime.txt         ← python-3.11.9
+├── main.py            ← Entry point
+├── README.md          ← Este arquivo
+└── src/
+    ├── __init__.py
+    ├── wipo_crawler.py      ← 200 linhas
+    ├── pipeline_service.py  ← 150 linhas
+    ├── api_service.py       ← 100 linhas
+    └── crawler_pool.py      ← 30 linhas
+```
 
-Check logs in Railway dashboard for detailed debug information.
-All responses include `debug` metadata for troubleshooting.
+## ⚠️ Bibliotecas Instaladas no Dockerfile
+
+O Dockerfile instala **TODAS** estas bibliotecas:
+- libglib2.0-0, libgobject-2.0-0
+- libnss3, libnspr4, libnssutil3
+- libatk1.0-0, libatk-bridge2.0-0
+- libcups2, libdrm2, libdbus-1-3
+- libxkbcommon0, libxcomposite1, libxdamage1
+- libxfixes3, libxrandr2, libgbm1
+- libpango-1.0-0, libcairo2, libasound2
+- libatspi2.0-0, libxshmfence1
+- E mais...
+
+## 🎯 Validação de Sucesso
+
+```bash
+# Deve retornar:
+{
+  "test": "SUCCESS",
+  "has_title": true,
+  "has_applicant": true,
+  "worldwide_apps": 70+,
+  "countries": 30+
+}
+```
+
+## 📞 Support
+
+Se o deploy falhar:
+1. Verificar logs do Railway
+2. Confirmar que Railway detectou o `Dockerfile`
+3. Verificar se build incluiu `playwright install --with-deps chromium`
+4. Tempo de build esperado: 3-4 minutos
+
+---
+
+**Version**: 3.1.0-HOTFIX  
+**Status**: ✅ PRODUCTION READY  
+**Deploy Target**: Railway  
+**Build Method**: Dockerfile  

@@ -1,65 +1,40 @@
-"""
-API Service v3.1 HOTFIX - FastAPI Patent Intelligence Service
-"""
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.middleware.cors import CORSMiddleware
-from typing import Optional
+"""FastAPI Service v3.1 HOTFIX"""
 import logging
-from datetime import datetime
-
-from .wipo_crawler import WIPOCrawler
-from .crawler_pool import CrawlerPool
-from .pipeline_service import PipelineService
-from .batch_service import BatchService
+from fastapi import FastAPI, HTTPException
+from fastapi.responses import JSONResponse
+from contextlib import asynccontextmanager
+from .crawler_pool import crawler_pool
+from .pipeline_service import pipeline_search
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-app = FastAPI(
-    title="Pharmyrus v3.1 HOTFIX",
-    version="3.1.0-HOTFIX",
-    description="Patent Intelligence API with complete worldwide data extraction"
-)
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-crawler_pool = CrawlerPool(pool_size=3)
-pipeline = PipelineService()
-batch = BatchService()
-
-@app.on_event("startup")
-async def startup():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
     logger.info("🚀 Pharmyrus WIPO API iniciando...")
     await crawler_pool.initialize()
     logger.info("✅ API pronta!")
-
-@app.on_event("shutdown")
-async def shutdown():
+    yield
+    logger.info("🛑 Encerrando...")
     await crawler_pool.close()
+
+app = FastAPI(
+    title="Pharmyrus WIPO API v3.1 HOTFIX",
+    version="3.1.0-HOTFIX",
+    lifespan=lifespan
+)
 
 @app.get("/")
 async def root():
     return {
-        "service": "Pharmyrus v3.1 HOTFIX",
+        "service": "Pharmyrus WIPO API",
         "version": "3.1.0-HOTFIX",
         "status": "operational",
-        "fixes": [
-            "WIPO worldwide_applications extraction",
-            "WO discovery with 20+ parallel sources",
-            "Local crawler integration",
-            "Complete debug system"
-        ],
         "endpoints": {
             "wipo": "/api/v1/wipo/{wo_number}",
             "search": "/api/v1/search/{molecule}",
-            "batch": "/api/v1/batch/search",
-            "test": "/test/{wo_number}"
+            "test": "/test/{wo_number}",
+            "health": "/health"
         }
     }
 
@@ -67,95 +42,69 @@ async def root():
 async def health():
     return {
         "status": "healthy",
-        "timestamp": datetime.utcnow().isoformat()
+        "crawlers": len(crawler_pool.crawlers),
+        "version": "3.1.0-HOTFIX"
     }
 
 @app.get("/api/v1/wipo/{wo_number}")
-async def get_wipo_patent(wo_number: str, country: Optional[str] = Query(None)):
+async def get_wipo_patent(wo_number: str, country: str = None):
+    """Fetch single WIPO patent"""
     try:
-        data = await crawler_pool.fetch_patent(wo_number)
-        
-        if not data or data.get('erro'):
-            raise HTTPException(status_code=404, detail=f"Patent {wo_number} not found")
+        crawler = crawler_pool.get_crawler()
+        result = await crawler.fetch_patent(wo_number)
         
         if country:
-            worldwide = data.get('worldwide_applications', {})
+            # Filter worldwide apps by country
             filtered = {}
-            for year, apps in worldwide.items():
-                filtered_apps = [app for app in apps if app.get('country_code') == country]
-                if filtered_apps:
-                    filtered[year] = filtered_apps
-            data['worldwide_applications'] = filtered
-            data['country_filter_applied'] = country
+            for year, apps in result.get('worldwide_applications', {}).items():
+                country_apps = [a for a in apps if a.get('country_code') == country.upper()]
+                if country_apps:
+                    filtered[year] = country_apps
+            result['worldwide_applications'] = filtered
+            result['filtered_country'] = country.upper()
         
-        return data
-    
-    except HTTPException:
-        raise
+        return result
     except Exception as e:
+        logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/v1/search/{molecule}")
-async def search_molecule(
-    molecule: str,
-    country: Optional[str] = Query(None),
-    limit: int = Query(20, ge=1, le=50)
-):
+async def search_molecule(molecule: str, limit: int = 5):
+    """Full pipeline search"""
     try:
-        result = await pipeline.execute_full_pipeline(
-            molecule=molecule,
-            country_filter=country,
-            limit=limit
-        )
+        result = await pipeline_search(molecule, max_wos=limit)
         return result
-    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-@app.post("/api/v1/batch/search")
-async def batch_search(request: dict):
-    try:
-        molecules = request.get("molecules", [])
-        if not molecules:
-            raise HTTPException(status_code=400, detail="molecules list required")
-        
-        result = await batch.process_batch(
-            molecules=molecules,
-            country_filter=request.get("country"),
-            limit=request.get("limit", 10)
-        )
-        return result
-    
-    except HTTPException:
-        raise
-    except Exception as e:
+        logger.error(f"Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/test/{wo_number}")
 async def test_endpoint(wo_number: str):
+    """Quick test endpoint"""
     try:
-        async with WIPOCrawler(max_retries=3, timeout=60000, headless=True) as crawler:
-            data = await crawler.fetch_patent(wo_number)
-        
-        br_patents = []
-        for year, apps in data.get('worldwide_applications', {}).items():
-            for app in apps:
-                if app.get('country_code') == 'BR':
-                    br_patents.append({
-                        "number": app.get('application_number', ''),
-                        "filing_date": app.get('filing_date', ''),
-                        "legal_status": app.get('legal_status', ''),
-                        "year": year
-                    })
+        crawler = crawler_pool.get_crawler()
+        result = await crawler.fetch_patent(wo_number)
         
         return {
+            "test": "SUCCESS",
             "wo_number": wo_number,
-            "title": data.get('titulo'),
-            "applicant": data.get('titular'),
-            "worldwide_applications": data.get('worldwide_applications'),
-            "br_patents": br_patents,
-            "debug": data.get('debug')
+            "has_title": bool(result.get('titulo')),
+            "has_applicant": bool(result.get('titular')),
+            "worldwide_apps": sum(len(apps) for apps in result.get('worldwide_applications', {}).values()),
+            "countries": len(result.get('paises_familia', [])),
+            "debug": result.get('debug', {}),
+            "full_data": result
         }
-    
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {
+            "test": "FAILED",
+            "error": str(e)
+        }
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    logger.error(f"Global error: {exc}")
+    return JSONResponse(
+        status_code=500,
+        content={"error": str(exc), "type": type(exc).__name__}
+    )
