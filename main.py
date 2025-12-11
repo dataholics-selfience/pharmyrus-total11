@@ -1,6 +1,9 @@
-"""Pharmyrus v3.1 HOTFIX - Entry Point"""
-from src.api_service import app
+import uvicorn
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8080)
+    uvicorn.run(
+        "src.api_service:app",
+        host="0.0.0.0",
+        port=8080,
+        reload=True
+    )
